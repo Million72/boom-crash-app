@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 const INSTRUMENTS = [
-  { id: "BOOM300N",  label: "Boom 300",   type: "boom",  color: "#00E5FF" },
-  { id: "BOOM500",   label: "Boom 500",   type: "boom",  color: "#00B8D4" },
-  { id: "BOOM1000",  label: "Boom 1000",  type: "boom",  color: "#0288D1" },
-  { id: "CRASH300N", label: "Crash 300",  type: "crash", color: "#FF4081" },
-  { id: "CRASH500",  label: "Crash 500",  type: "crash", color: "#F50057" },
-  { id: "CRASH1000", label: "Crash 1000", type: "crash", color: "#C51162" },
+  { id: "BOOM300N",  label: "Boom 300",   type: "boom",  color: "#00E5FF", avgInterval: 300  },
+  { id: "BOOM500",   label: "Boom 500",   type: "boom",  color: "#00B8D4", avgInterval: 500  },
+  { id: "BOOM1000",  label: "Boom 1000",  type: "boom",  color: "#0288D1", avgInterval: 1000 },
+  { id: "CRASH300N", label: "Crash 300",  type: "crash", color: "#FF4081", avgInterval: 300  },
+  { id: "CRASH500",  label: "Crash 500",  type: "crash", color: "#F50057", avgInterval: 500  },
+  { id: "CRASH1000", label: "Crash 1000", type: "crash", color: "#C51162", avgInterval: 1000 },
 ];
 
 const MAX_TICKS      = 200;
@@ -14,8 +14,6 @@ const EMA_FAST       = 9;
 const EMA_SLOW       = 21;
 const RSI_PERIOD     = 14;
 const SPIKE_THRESHOLD = 0.003;
-
-// ─── Indicator helpers ────────────────────────────────────────────────────────
 
 function calcEMA(prices, period) {
   if (prices.length < period) return null;
@@ -83,8 +81,6 @@ function getSignal(prices, type) {
   return { signal, strength: Math.min(score, 9), rsi: rsi.toFixed(1), emaFast, emaSlow };
 }
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
-
 function MiniChart({ ticks, color, gradientId }) {
   if (ticks.length < 2) return <div style={{ height: 48 }} />;
   const vals  = ticks.slice(-60);
@@ -149,24 +145,55 @@ function StrengthBar({ strength, max = 9 }) {
   );
 }
 
-function InstrumentCard({ instrument, ticks, signal, onToggleBot, botActive, alertCount }) {
+function getSpikeZone(ticksSince, avgInterval) {
+  const pct = Math.min((ticksSince / avgInterval) * 100, 100);
+  if (pct >= 80) return { zone: "HIGH",     color: "#FF6400", pct };
+  if (pct >= 50) return { zone: "BUILDING", color: "#FFD700", pct };
+  return            { zone: "LOW",      color: "#00B8D4", pct };
+}
+
+function ProbabilityMeter({ ticksSince, avgInterval }) {
+  const { zone, color, pct } = getSpikeZone(ticksSince, avgInterval);
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+        <span style={{ fontSize: 11, color: "#666" }}>Spike Probability</span>
+        <span style={{ fontSize: 11, fontWeight: 700, color, letterSpacing: 0.5 }}>
+          {zone} · {ticksSince}/{avgInterval}
+        </span>
+      </div>
+      <div style={{ height: 5, background: "rgba(255,255,255,0.08)", borderRadius: 3, overflow: "hidden" }}>
+        <div style={{ width: `${pct}%`, height: "100%", background: color, borderRadius: 3, transition: "width 0.3s" }} />
+      </div>
+    </div>
+  );
+}
+
+function InstrumentCard({ instrument, ticks, signal, onToggleBot, botActive, alertCount, ticksSinceSpike }) {
   const isSpike = detectSpike(ticks);
   const last    = ticks[ticks.length - 1];
   const prev    = ticks[ticks.length - 2];
   const change  = (last !== undefined && prev) ? ((last - prev) / prev * 100) : 0;
-  // stable gradient id derived from instrument id (no spaces / special chars)
   const gradId  = `grad-${instrument.id}`;
+  const { zone: spikeZone } = getSpikeZone(ticksSinceSpike ?? 0, instrument.avgInterval);
+  const isHighZone = spikeZone === "HIGH" && !isSpike;
+
+  const borderColor = isSpike ? "#FFD700" : isHighZone ? "#FF6400" : "rgba(255,255,255,0.08)";
+  const glow = isSpike
+    ? "0 0 16px rgba(255,215,0,0.15)"
+    : isHighZone
+    ? "0 0 14px rgba(255,100,0,0.12)"
+    : "none";
 
   return (
     <div style={{
       background:    "rgba(255,255,255,0.04)",
-      border:        `1px solid ${isSpike ? "#FFD700" : "rgba(255,255,255,0.08)"}`,
+      border:        `1px solid ${borderColor}`,
       borderRadius:  14,
       padding:       "14px 16px",
       transition:    "border-color 0.3s",
-      boxShadow:     isSpike ? "0 0 16px rgba(255,215,0,0.15)" : "none",
+      boxShadow:     glow,
     }}>
-      {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <div style={{
@@ -181,6 +208,11 @@ function InstrumentCard({ instrument, ticks, signal, onToggleBot, botActive, ale
               ⚡ SPIKE
             </span>
           )}
+          {isHighZone && (
+            <span style={{ fontSize: 10, background: "rgba(255,100,0,0.2)", color: "#FF6400", borderRadius: 4, padding: "1px 6px", fontWeight: 700 }}>
+              👀 WATCH
+            </span>
+          )}
           {alertCount > 0 && (
             <span style={{ fontSize: 10, background: "rgba(255,100,0,0.2)", color: "#FF6400", borderRadius: 4, padding: "1px 6px" }}>
               🔔 {alertCount}
@@ -190,7 +222,6 @@ function InstrumentCard({ instrument, ticks, signal, onToggleBot, botActive, ale
         <SignalBadge signal={signal.signal} />
       </div>
 
-      {/* Price */}
       <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6 }}>
         <span style={{ fontSize: 22, fontWeight: 800, color: "#fff", fontFamily: "monospace" }}>
           {last !== undefined ? last.toFixed(2) : "—"}
@@ -200,23 +231,21 @@ function InstrumentCard({ instrument, ticks, signal, onToggleBot, botActive, ale
         </span>
       </div>
 
-      {/* Chart */}
       <MiniChart ticks={ticks} color={instrument.color} gradientId={gradId} />
 
-      {/* Indicators */}
       <div style={{ display: "flex", gap: 12, marginTop: 8, marginBottom: 8 }}>
         <span style={{ fontSize: 11, color: "#888" }}>RSI <span style={{ color: "#ccc" }}>{signal.rsi ?? "—"}</span></span>
         <span style={{ fontSize: 11, color: "#888" }}>EMA9 <span style={{ color: "#ccc" }}>{signal.emaFast !== null ? signal.emaFast.toFixed(2) : "—"}</span></span>
         <span style={{ fontSize: 11, color: "#888" }}>EMA21 <span style={{ color: "#ccc" }}>{signal.emaSlow !== null ? signal.emaSlow.toFixed(2) : "—"}</span></span>
       </div>
 
-      {/* Strength */}
+      <ProbabilityMeter ticksSince={ticksSinceSpike ?? 0} avgInterval={instrument.avgInterval} />
+
       <div style={{ marginBottom: 10 }}>
         <div style={{ fontSize: 11, color: "#666", marginBottom: 3 }}>Signal Strength</div>
         <StrengthBar strength={signal.strength} />
       </div>
 
-      {/* Bot toggle */}
       <button
         onClick={() => onToggleBot(instrument.id)}
         style={{
@@ -261,21 +290,21 @@ function AlertLog({ alerts }) {
   );
 }
 
-// ─── Main App ────────────────────────────────────────────────────────────────
-
 export default function App() {
-  const [tickData,   setTickData]   = useState({});   // { [symbol]: number[] }
-  const [signals,    setSignals]    = useState({});   // { [symbol]: SignalResult }
-  const [prevSigs,   setPrevSigs]   = useState({});   // track previous signal to fire alert once
-  const [activeBots, setActiveBots] = useState({});
-  const [alerts,     setAlerts]     = useState([]);
-  const [connected,  setConnected]  = useState(false);
-  const [activeTab,  setActiveTab]  = useState("boom");
-  const [filter,     setFilter]     = useState("all");
+  const [tickData,        setTickData]        = useState({});
+  const [signals,         setSignals]         = useState({});
+  const [prevSigs,        setPrevSigs]        = useState({});
+  const [activeBots,      setActiveBots]      = useState({});
+  const [alerts,          setAlerts]          = useState([]);
+  const [connected,       setConnected]       = useState(false);
+  const [activeTab,       setActiveTab]       = useState("boom");
+  const [filter,          setFilter]          = useState("all");
+  const [ticksSinceSpike, setTicksSinceSpike] = useState({});
 
-  const wsRef       = useRef(null);
-  const alertsRef   = useRef([]);
-  const prevSigsRef = useRef({});   // ref copy so ws handler always sees latest
+  const wsRef            = useRef(null);
+  const alertsRef        = useRef([]);
+  const prevSigsRef      = useRef({});
+  const ticksSinceSpikeRef = useRef({});
 
   const addAlert = useCallback((alert) => {
     alertsRef.current = [alert, ...alertsRef.current].slice(0, 50);
@@ -310,23 +339,24 @@ export default function App() {
         const existing = prev[symbol] || [];
         const updated  = [...existing, quote].slice(-MAX_TICKS);
 
-        // Compute signal synchronously here so we can compare with previous
         const sig      = getSignal(updated, inst.type);
         const prevSig  = prevSigsRef.current[symbol] ?? "WAIT";
 
-        // Spike alert (only fire on rising edge)
         const wasSpike = detectSpike(existing);
         const isSpike  = detectSpike(updated);
         if (isSpike && !wasSpike) {
           addAlert({ label: inst.label, type: "spike", time });
         }
 
-        // Signal alert (only when transitioning from WAIT → BUY/SELL)
+        const prevCount = ticksSinceSpikeRef.current[symbol] ?? 0;
+        const newCount  = isSpike ? 0 : prevCount + 1;
+        ticksSinceSpikeRef.current = { ...ticksSinceSpikeRef.current, [symbol]: newCount };
+        setTicksSinceSpike(ts => ({ ...ts, [symbol]: newCount }));
+
         if (sig.signal !== "WAIT" && prevSig === "WAIT") {
           addAlert({ label: inst.label, signal: sig.signal, type: "signal", time });
         }
 
-        // Update refs & state
         prevSigsRef.current = { ...prevSigsRef.current, [symbol]: sig.signal };
         setPrevSigs(ps => ({ ...ps, [symbol]: sig.signal }));
         setSignals(ps  => ({ ...ps, [symbol]: sig }));
@@ -352,7 +382,6 @@ export default function App() {
     setActiveBots(prev => ({ ...prev, [id]: !prev[id] }));
   }, []);
 
-  // Alert counts per instrument label
   const alertCounts = alerts.reduce((acc, a) => {
     acc[a.label] = (acc[a.label] || 0) + 1;
     return acc;
@@ -385,7 +414,6 @@ export default function App() {
       maxWidth: 480,
       margin: "0 auto",
     }}>
-      {/* ── Top bar ── */}
       <div style={{
         padding: "16px 20px 12px",
         background: "rgba(255,255,255,0.02)",
@@ -422,7 +450,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Stats row */}
         <div style={{ display: "flex", gap: 20, marginTop: 10 }}>
           {[
             { label: "Signals", value: totalSignals, color: totalSignals > 0 ? "#FFD700" : "#444" },
@@ -438,7 +465,6 @@ export default function App() {
         </div>
       </div>
 
-      {/* ── Tabs ── */}
       <div style={{ display: "flex", padding: "12px 20px 0", gap: 8 }}>
         {[
           { id: "boom",  label: "Boom",  color: "#00B8D4" },
@@ -463,7 +489,6 @@ export default function App() {
         >⚡ Signals only</button>
       </div>
 
-      {/* ── Cards ── */}
       <div style={{ padding: "12px 20px", display: "flex", flexDirection: "column", gap: 12 }}>
         {visibleInstruments.length === 0 ? (
           <div style={{ textAlign: "center", color: "#555", padding: "40px 0", fontSize: 14 }}>
@@ -478,19 +503,20 @@ export default function App() {
             onToggleBot={toggleBot}
             botActive={!!activeBots[inst.id]}
             alertCount={alertCounts[inst.label] || 0}
+            ticksSinceSpike={ticksSinceSpike[inst.id] || 0}
           />
         ))}
       </div>
 
-      {/* ── Alert log ── */}
       <div style={{ padding: "0 20px" }}>
         <AlertLog alerts={alerts} />
       </div>
 
-      {/* ── Footer ── */}
       <div style={{ textAlign: "center", padding: "20px 20px 0", fontSize: 11, color: "#333" }}>
         Live data via Deriv WebSocket API · Signals are analytical tools, not financial advice
       </div>
     </div>
   );
 }
+        
+     

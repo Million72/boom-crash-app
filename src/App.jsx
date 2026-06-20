@@ -9,11 +9,13 @@ const INSTRUMENTS = [
   { id: "CRASH1000", label: "Crash 1000", type: "crash", color: "#C51162", avgInterval: 1000 },
 ];
 
-const MAX_TICKS      = 200;
-const EMA_FAST       = 9;
-const EMA_SLOW       = 21;
-const RSI_PERIOD     = 14;
+const MAX_TICKS       = 200;
+const EMA_FAST        = 9;
+const EMA_SLOW        = 21;
+const RSI_PERIOD      = 14;
 const SPIKE_THRESHOLD = 0.003;
+const EVALUATION_TICKS = 10;            // how many ticks after a signal before scoring win/loss
+const TRADE_LOG_KEY    = "boomCrashTradeLog";
 
 // ─── Audio & Haptics helpers ──────────────────────────────────────────────────
 
@@ -358,6 +360,78 @@ function AlertLog({ alerts }) {
   );
 }
 
+function StatBox({ label, value, color }) {
+  return (
+    <div style={{
+      flex: 1, textAlign: "center", background: "rgba(255,255,255,0.03)",
+      borderRadius: 10, padding: "8px 4px",
+    }}>
+      <div style={{ fontSize: 15, fontWeight: 700, color, fontFamily: "monospace" }}>{value}</div>
+      <div style={{ fontSize: 9, color: "#666", letterSpacing: 0.5, marginTop: 2 }}>{label}</div>
+    </div>
+  );
+}
+
+function TradeLog({ trades, onClear }) {
+  const total = trades.length;
+
+  if (total === 0) {
+    return (
+      <div style={{ marginTop: 20 }}>
+        <div style={{ fontSize: 12, color: "#666", marginBottom: 8, letterSpacing: 1, textTransform: "uppercase" }}>
+          Performance
+        </div>
+        <div style={{ fontSize: 12, color: "#555", textAlign: "center", padding: "16px 0" }}>
+          No closed signals yet — results appear {EVALUATION_TICKS} ticks after each signal fires
+        </div>
+      </div>
+    );
+  }
+
+  const wins    = trades.filter(t => t.win).length;
+  const losses  = total - wins;
+  const winRate = ((wins / total) * 100).toFixed(1);
+
+  return (
+    <div style={{ marginTop: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <div style={{ fontSize: 12, color: "#666", letterSpacing: 1, textTransform: "uppercase" }}>
+          Performance
+        </div>
+        <button
+          onClick={onClear}
+          style={{ fontSize: 10, color: "#666", background: "none", border: "none", cursor: "pointer", padding: 0 }}
+        >Clear</button>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+        <StatBox label="WIN RATE" value={`${winRate}%`} color={winRate >= 50 ? "#00E564" : "#FF4081"} />
+        <StatBox label="WINS"     value={wins}           color="#00E564" />
+        <StatBox label="LOSSES"   value={losses}          color="#FF4081" />
+        <StatBox label="TOTAL"    value={total}            color="#888" />
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 200, overflowY: "auto" }}>
+        {trades.slice(0, 30).map(t => (
+          <div key={t.id} style={{
+            background: "rgba(255,255,255,0.04)", borderRadius: 8, padding: "8px 12px",
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+            borderLeft: `3px solid ${t.win ? "#00E564" : "#FF4081"}`,
+          }}>
+            <div>
+              <span style={{ fontSize: 12, color: "#fff", fontWeight: 600 }}>{t.label}</span>
+              <span style={{ fontSize: 11, color: "#888", marginLeft: 8 }}>
+                {t.signal === "BUY" ? "⬆" : "⬇"} {t.signal} · {t.win ? "✅ WIN" : "❌ LOSS"}
+              </span>
+            </div>
+            <span style={{ fontSize: 10, color: "#555" }}>{t.closedTime}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ─── Main App ────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -371,6 +445,7 @@ export default function App() {
   const [filter,          setFilter]          = useState("all");
   const [ticksSinceSpike, setTicksSinceSpike] = useState({});   // { [symbol]: number }
   const [soundEnabled,    setSoundEnabled]    = useState(true);
+  const [tradeLog,        setTradeLog]        = useState([]);   // closed signal outcomes, newest first
 
   const wsRef              = useRef(null);
   const alertsRef          = useRef([]);
@@ -378,8 +453,32 @@ export default function App() {
   const ticksSinceSpikeRef = useRef({});   // ref copy so ws handler always sees latest
   const prevZoneRef        = useRef({});   // tracks LOW/BUILDING/HIGH per symbol
   const soundEnabledRef    = useRef(true); // ref copy so ws handler always sees latest
+  const tradeLogRef        = useRef([]);   // ref copy so ws handler always sees latest
+  const openTradesRef      = useRef({});   // { [symbol]: { entryPrice, ticksElapsed, signal, time, label } }
 
   useEffect(() => { soundEnabledRef.current = soundEnabled; }, [soundEnabled]);
+
+  // Load any saved trade history on first mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(TRADE_LOG_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        tradeLogRef.current = parsed;
+        setTradeLog(parsed);
+      }
+    } catch { /* localStorage unavailable or corrupt, start fresh */ }
+  }, []);
+
+  const persistTradeLog = useCallback((log) => {
+    try { localStorage.setItem(TRADE_LOG_KEY, JSON.stringify(log.slice(0, 200))); } catch { /* ignore */ }
+  }, []);
+
+  const clearTradeLog = useCallback(() => {
+    tradeLogRef.current = [];
+    setTradeLog([]);
+    try { localStorage.removeItem(TRADE_LOG_KEY); } catch { /* ignore */ }
+  }, []);
 
   const addAlert = useCallback((alert) => {
     alertsRef.current = [alert, ...alertsRef.current].slice(0, 50);
@@ -462,11 +561,30 @@ export default function App() {
         }
         prevZoneRef.current = { ...prevZoneRef.current, [symbol]: currZone };
 
-        // Signal alert (only when transitioning from WAIT → BUY/SELL)
-        if (sig.signal !== "WAIT" && prevSig === "WAIT") {
-          addAlert({ label: inst.label, signal: sig.signal, type: "signal", time });
+        // Progress any open trade for this symbol — close it out once EVALUATION_TICKS pass
+        const openTrade = openTradesRef.current[symbol];
+        if (openTrade) {
+          const ticksElapsed = openTrade.ticksElapsed + 1;
+          if (ticksElapsed >= EVALUATION_TICKS) {
+            const win = openTrade.signal === "BUY" ? quote > openTrade.entryPrice : quote < openTrade.entryPrice;
+            const closedTrade = {
+              id: `${symbol}-${openTrade.time}-${Math.random().toString(36).slice(2, 7)}`,
+              label: openTrade.label,
+              signal: openTrade.signal,
+              entryPrice: openTrade.entryPrice,
+              exitPrice: quote,
+              win,
+              time: openTrade.time,
+              closedTime: time,
+            };
+            tradeLogRef.current = [closedTrade, ...tradeLogRef.current].slice(0, 200);
+            setTradeLog([...tradeLogRef.current]);
+            persistTradeLog(tradeLogRef.current);
+            delete openTradesRef.current[symbol];
+          } else {
+            openTradesRef.current[symbol] = { ...openTrade, ticksElapsed };
+          }
         }
-
         // Update refs & state
         prevSigsRef.current = { ...prevSigsRef.current, [symbol]: sig.signal };
         setPrevSigs(ps => ({ ...ps, [symbol]: sig.signal }));
@@ -482,7 +600,7 @@ export default function App() {
     };
 
     ws.onerror = () => ws.close();
-  }, [addAlert]);
+  }, [addAlert, persistTradeLog]);
 
   useEffect(() => {
     connectWS();
@@ -575,7 +693,6 @@ export default function App() {
             </div>
           </div>
         </div>
-
         {/* Stats row */}
         <div style={{ display: "flex", gap: 20, marginTop: 10 }}>
           {[
@@ -637,6 +754,11 @@ export default function App() {
         ))}
       </div>
 
+      {/* ── Performance / Trade log ── */}
+      <div style={{ padding: "0 20px" }}>
+        <TradeLog trades={tradeLog} onClear={clearTradeLog} />
+      </div>
+
       {/* ── Alert log ── */}
       <div style={{ padding: "0 20px" }}>
         <AlertLog alerts={alerts} />
@@ -649,3 +771,4 @@ export default function App() {
     </div>
   );
 }
+      

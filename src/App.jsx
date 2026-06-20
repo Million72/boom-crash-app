@@ -15,6 +15,62 @@ const EMA_SLOW       = 21;
 const RSI_PERIOD     = 14;
 const SPIKE_THRESHOLD = 0.003;
 
+// ─── Audio & Haptics helpers ──────────────────────────────────────────────────
+
+let _audioCtx = null;
+
+function getAudioCtx() {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return null;
+  if (!_audioCtx) _audioCtx = new Ctx();
+  if (_audioCtx.state === "suspended") _audioCtx.resume();
+  return _audioCtx;
+}
+
+function playTone(freq, duration = 0.15, delay = 0, type = "sine", volume = 0.2) {
+  const ctx = getAudioCtx();
+  if (!ctx) return;
+  try {
+    const osc  = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = type;
+    osc.frequency.value = freq;
+    gain.gain.value = volume;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    const t0 = ctx.currentTime + delay;
+    osc.start(t0);
+    osc.stop(t0 + duration);
+  } catch { /* audio unavailable, fail silently */ }
+}
+
+function playSpikeSound() {
+  playTone(1200, 0.12, 0,    "square", 0.25);
+  playTone(1600, 0.12, 0.13, "square", 0.25);
+}
+
+function playSignalSound(signal) {
+  if (signal === "BUY") {
+    playTone(660, 0.12, 0,    "sine", 0.2);
+    playTone(880, 0.15, 0.13, "sine", 0.2);
+  } else {
+    playTone(880, 0.12, 0,    "sine", 0.2);
+    playTone(660, 0.15, 0.13, "sine", 0.2);
+  }
+}
+
+function playWatchSound() {
+  playTone(740, 0.1, 0, "sine", 0.12);
+}
+
+function vibrateDevice(pattern) {
+  if (navigator.vibrate) {
+    try { navigator.vibrate(pattern); } catch { /* unsupported, fail silently */ }
+  }
+}
+
+// ─── Indicator helpers ────────────────────────────────────────────────────────
+
 function calcEMA(prices, period) {
   if (prices.length < period) return null;
   const k = 2 / (period + 1);
@@ -80,6 +136,8 @@ function getSignal(prices, type) {
 
   return { signal, strength: Math.min(score, 9), rsi: rsi.toFixed(1), emaFast, emaSlow };
 }
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
 
 function MiniChart({ ticks, color, gradientId }) {
   if (ticks.length < 2) return <div style={{ height: 48 }} />;
@@ -174,6 +232,7 @@ function InstrumentCard({ instrument, ticks, signal, onToggleBot, botActive, ale
   const last    = ticks[ticks.length - 1];
   const prev    = ticks[ticks.length - 2];
   const change  = (last !== undefined && prev) ? ((last - prev) / prev * 100) : 0;
+  // stable gradient id derived from instrument id (no spaces / special chars)
   const gradId  = `grad-${instrument.id}`;
   const { zone: spikeZone } = getSpikeZone(ticksSinceSpike ?? 0, instrument.avgInterval);
   const isHighZone = spikeZone === "HIGH" && !isSpike;
@@ -194,6 +253,7 @@ function InstrumentCard({ instrument, ticks, signal, onToggleBot, botActive, ale
       transition:    "border-color 0.3s",
       boxShadow:     glow,
     }}>
+      {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <div style={{
@@ -222,6 +282,7 @@ function InstrumentCard({ instrument, ticks, signal, onToggleBot, botActive, ale
         <SignalBadge signal={signal.signal} />
       </div>
 
+      {/* Price */}
       <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6 }}>
         <span style={{ fontSize: 22, fontWeight: 800, color: "#fff", fontFamily: "monospace" }}>
           {last !== undefined ? last.toFixed(2) : "—"}
@@ -231,21 +292,26 @@ function InstrumentCard({ instrument, ticks, signal, onToggleBot, botActive, ale
         </span>
       </div>
 
+      {/* Chart */}
       <MiniChart ticks={ticks} color={instrument.color} gradientId={gradId} />
 
+      {/* Indicators */}
       <div style={{ display: "flex", gap: 12, marginTop: 8, marginBottom: 8 }}>
         <span style={{ fontSize: 11, color: "#888" }}>RSI <span style={{ color: "#ccc" }}>{signal.rsi ?? "—"}</span></span>
         <span style={{ fontSize: 11, color: "#888" }}>EMA9 <span style={{ color: "#ccc" }}>{signal.emaFast !== null ? signal.emaFast.toFixed(2) : "—"}</span></span>
         <span style={{ fontSize: 11, color: "#888" }}>EMA21 <span style={{ color: "#ccc" }}>{signal.emaSlow !== null ? signal.emaSlow.toFixed(2) : "—"}</span></span>
       </div>
 
+      {/* Spike Probability */}
       <ProbabilityMeter ticksSince={ticksSinceSpike ?? 0} avgInterval={instrument.avgInterval} />
 
+      {/* Strength */}
       <div style={{ marginBottom: 10 }}>
         <div style={{ fontSize: 11, color: "#666", marginBottom: 3 }}>Signal Strength</div>
         <StrengthBar strength={signal.strength} />
       </div>
 
+      {/* Bot toggle */}
       <button
         onClick={() => onToggleBot(instrument.id)}
         style={{
@@ -270,45 +336,77 @@ function AlertLog({ alerts }) {
         Recent Alerts
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 160, overflowY: "auto" }}>
-        {[...alerts].reverse().map((a, i) => (
-          <div key={i} style={{
-            background: "rgba(255,255,255,0.04)", borderRadius: 8, padding: "8px 12px",
-            display: "flex", justifyContent: "space-between", alignItems: "center",
-            borderLeft: `3px solid ${a.type === "spike" ? "#FFD700" : a.signal === "BUY" ? "#00E564" : "#FF4081"}`,
-          }}>
-            <div>
-              <span style={{ fontSize: 12, color: "#fff", fontWeight: 600 }}>{a.label}</span>
-              <span style={{ fontSize: 11, color: "#888", marginLeft: 8 }}>
-                {a.type === "spike" ? "⚡ Spike detected" : a.signal === "BUY" ? "⬆ Buy signal" : "⬇ Sell signal"}
-              </span>
+        {[...alerts].reverse().map((a, i) => {
+          const borderColor = a.type === "spike" ? "#FFD700" : a.type === "watch" ? "#FF6400" : a.signal === "BUY" ? "#00E564" : "#FF4081";
+          const text = a.type === "spike" ? "⚡ Spike detected" : a.type === "watch" ? "👀 High probability zone" : a.signal === "BUY" ? "⬆ Buy signal" : "⬇ Sell signal";
+          return (
+            <div key={i} style={{
+              background: "rgba(255,255,255,0.04)", borderRadius: 8, padding: "8px 12px",
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+              borderLeft: `3px solid ${borderColor}`,
+            }}>
+              <div>
+                <span style={{ fontSize: 12, color: "#fff", fontWeight: 600 }}>{a.label}</span>
+                <span style={{ fontSize: 11, color: "#888", marginLeft: 8 }}>{text}</span>
+              </div>
+              <span style={{ fontSize: 10, color: "#555" }}>{a.time}</span>
             </div>
-            <span style={{ fontSize: 10, color: "#555" }}>{a.time}</span>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
 }
 
+// ─── Main App ────────────────────────────────────────────────────────────────
+
 export default function App() {
-  const [tickData,        setTickData]        = useState({});
-  const [signals,         setSignals]         = useState({});
-  const [prevSigs,        setPrevSigs]        = useState({});
+  const [tickData,        setTickData]        = useState({});   // { [symbol]: number[] }
+  const [signals,         setSignals]         = useState({});   // { [symbol]: SignalResult }
+  const [prevSigs,        setPrevSigs]        = useState({});   // track previous signal to fire alert once
   const [activeBots,      setActiveBots]      = useState({});
   const [alerts,          setAlerts]          = useState([]);
   const [connected,       setConnected]       = useState(false);
   const [activeTab,       setActiveTab]       = useState("boom");
   const [filter,          setFilter]          = useState("all");
-  const [ticksSinceSpike, setTicksSinceSpike] = useState({});
+  const [ticksSinceSpike, setTicksSinceSpike] = useState({});   // { [symbol]: number }
+  const [soundEnabled,    setSoundEnabled]    = useState(true);
 
-  const wsRef            = useRef(null);
-  const alertsRef        = useRef([]);
-  const prevSigsRef      = useRef({});
-  const ticksSinceSpikeRef = useRef({});
+  const wsRef              = useRef(null);
+  const alertsRef          = useRef([]);
+  const prevSigsRef        = useRef({});   // ref copy so ws handler always sees latest
+  const ticksSinceSpikeRef = useRef({});   // ref copy so ws handler always sees latest
+  const prevZoneRef        = useRef({});   // tracks LOW/BUILDING/HIGH per symbol
+  const soundEnabledRef    = useRef(true); // ref copy so ws handler always sees latest
+
+  useEffect(() => { soundEnabledRef.current = soundEnabled; }, [soundEnabled]);
 
   const addAlert = useCallback((alert) => {
     alertsRef.current = [alert, ...alertsRef.current].slice(0, 50);
     setAlerts([...alertsRef.current]);
+
+    if (!soundEnabledRef.current) return;
+    if (alert.type === "spike") {
+      playSpikeSound();
+      vibrateDevice([80, 40, 80]);
+    } else if (alert.type === "signal") {
+      playSignalSound(alert.signal);
+      vibrateDevice(alert.signal === "BUY" ? [150] : [150, 60, 150]);
+    } else if (alert.type === "watch") {
+      playWatchSound();
+      vibrateDevice([40]);
+    }
+  }, []);
+
+  const toggleSound = useCallback(() => {
+    setSoundEnabled(prevVal => {
+      const next = !prevVal;
+      if (next) {
+        getAudioCtx();
+        playTone(880, 0.1); // confirmation beep when turning on
+      }
+      return next;
+    });
   }, []);
 
   const connectWS = useCallback(() => {
@@ -339,24 +437,37 @@ export default function App() {
         const existing = prev[symbol] || [];
         const updated  = [...existing, quote].slice(-MAX_TICKS);
 
+        // Compute signal synchronously here so we can compare with previous
         const sig      = getSignal(updated, inst.type);
         const prevSig  = prevSigsRef.current[symbol] ?? "WAIT";
 
+        // Spike alert (only fire on rising edge)
         const wasSpike = detectSpike(existing);
         const isSpike  = detectSpike(updated);
         if (isSpike && !wasSpike) {
           addAlert({ label: inst.label, type: "spike", time });
         }
 
+        // Ticks-since-last-spike counter (resets to 0 the moment a spike fires)
         const prevCount = ticksSinceSpikeRef.current[symbol] ?? 0;
         const newCount  = isSpike ? 0 : prevCount + 1;
         ticksSinceSpikeRef.current = { ...ticksSinceSpikeRef.current, [symbol]: newCount };
         setTicksSinceSpike(ts => ({ ...ts, [symbol]: newCount }));
 
+        // Watch alert (only fire once, on the moment we enter the HIGH probability zone)
+        const prevZone = prevZoneRef.current[symbol] ?? "LOW";
+        const currZone = getSpikeZone(newCount, inst.avgInterval).zone;
+        if (currZone === "HIGH" && prevZone !== "HIGH") {
+          addAlert({ label: inst.label, type: "watch", time });
+        }
+        prevZoneRef.current = { ...prevZoneRef.current, [symbol]: currZone };
+
+        // Signal alert (only when transitioning from WAIT → BUY/SELL)
         if (sig.signal !== "WAIT" && prevSig === "WAIT") {
           addAlert({ label: inst.label, signal: sig.signal, type: "signal", time });
         }
 
+        // Update refs & state
         prevSigsRef.current = { ...prevSigsRef.current, [symbol]: sig.signal };
         setPrevSigs(ps => ({ ...ps, [symbol]: sig.signal }));
         setSignals(ps  => ({ ...ps, [symbol]: sig }));
@@ -382,6 +493,7 @@ export default function App() {
     setActiveBots(prev => ({ ...prev, [id]: !prev[id] }));
   }, []);
 
+  // Alert counts per instrument label
   const alertCounts = alerts.reduce((acc, a) => {
     acc[a.label] = (acc[a.label] || 0) + 1;
     return acc;
@@ -414,6 +526,7 @@ export default function App() {
       maxWidth: 480,
       margin: "0 auto",
     }}>
+      {/* ── Top bar ── */}
       <div style={{
         padding: "16px 20px 12px",
         background: "rgba(255,255,255,0.02)",
@@ -429,6 +542,19 @@ export default function App() {
             <div style={{ fontSize: 11, color: "#555", letterSpacing: 1, marginTop: 1 }}>SIGNAL TERMINAL</div>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button
+              onClick={toggleSound}
+              style={{
+                width: 28, height: 28, borderRadius: 8, border: "1px solid rgba(255,255,255,0.1)",
+                background: soundEnabled ? "rgba(0,229,100,0.12)" : "rgba(255,255,255,0.04)",
+                color: soundEnabled ? "#00E564" : "#666",
+                fontSize: 14, cursor: "pointer", display: "flex",
+                alignItems: "center", justifyContent: "center",
+              }}
+              aria-label={soundEnabled ? "Mute alerts" : "Unmute alerts"}
+            >
+              {soundEnabled ? "🔊" : "🔇"}
+            </button>
             {totalBots > 0 && (
               <div style={{
                 fontSize: 11, background: "rgba(0,229,100,0.15)", color: "#00E564",
@@ -450,6 +576,7 @@ export default function App() {
           </div>
         </div>
 
+        {/* Stats row */}
         <div style={{ display: "flex", gap: 20, marginTop: 10 }}>
           {[
             { label: "Signals", value: totalSignals, color: totalSignals > 0 ? "#FFD700" : "#444" },
@@ -465,6 +592,7 @@ export default function App() {
         </div>
       </div>
 
+      {/* ── Tabs ── */}
       <div style={{ display: "flex", padding: "12px 20px 0", gap: 8 }}>
         {[
           { id: "boom",  label: "Boom",  color: "#00B8D4" },
@@ -489,6 +617,7 @@ export default function App() {
         >⚡ Signals only</button>
       </div>
 
+      {/* ── Cards ── */}
       <div style={{ padding: "12px 20px", display: "flex", flexDirection: "column", gap: 12 }}>
         {visibleInstruments.length === 0 ? (
           <div style={{ textAlign: "center", color: "#555", padding: "40px 0", fontSize: 14 }}>
@@ -508,15 +637,15 @@ export default function App() {
         ))}
       </div>
 
+      {/* ── Alert log ── */}
       <div style={{ padding: "0 20px" }}>
         <AlertLog alerts={alerts} />
       </div>
 
+      {/* ── Footer ── */}
       <div style={{ textAlign: "center", padding: "20px 20px 0", fontSize: 11, color: "#333" }}>
         Live data via Deriv WebSocket API · Signals are analytical tools, not financial advice
       </div>
     </div>
   );
 }
-        
-     
